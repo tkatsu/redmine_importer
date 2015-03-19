@@ -1,8 +1,8 @@
 en:
   label_import: "Import"
   label_issue_importer: "Issue Importer"
-  label_upload_notice: "Select a CSV file to import. Import file must have a header row. Maximum size 4MB."
-  label_upload_format: "File format settings"
+  label_upload_notice: "Select a file to import. Import file must have a header row. Maximum size 4MB. Supported formats: xls, xlsx, odp, csv"
+  label_upload_format: "File format settings (Only for csv)"
   label_upload_encoding: "Encoding:"
   label_upload_splitter: "Field separator character:"
   label_upload_wrapper: "Field quoting character:"

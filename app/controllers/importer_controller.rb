@@ -1,4 +1,5 @@
 require 'csv'
+require 'roo'
 require 'tempfile'
 
 class MultipleIssuesForUniqueValue < Exception
@@ -30,11 +31,15 @@ class ImporterController < ApplicationController
     # Delete existing iip to ensure there can't be two iips for a user
     ImportInProgress.delete_all(["user_id = ?",User.current.id])
     # save import-in-progress data
-    iip = ImportInProgress.find_or_create_by_user_id(User.current.id)
-    iip.quote_char = params[:wrapper]
-    iip.col_sep = params[:splitter]
-    iip.encoding = params[:encoding]
-    iip.created = Time.new
+    #iip = ImportInProgress.find_or_create_by_user_id(User.current.id)
+    # by Katsuyama
+    iip = ImportInProgress.where(user_id: User.current.id).first_or_create do |iip|
+      iip.user_id = User.current.id
+      iip.quote_char = params[:wrapper]
+      iip.col_sep = params[:splitter]
+      iip.encoding = params[:encoding]
+      iip.created = Time.new
+    end
 
     unless params[:file]
       flash[:error] = 'You must provide a file !'
@@ -45,6 +50,7 @@ class ImporterController < ApplicationController
 
     iip.csv_data = params[:file].read
     iip.save
+    @@uploaded_file = params[:file]
     
     # Put the timestamp in the params to detect
     # users with two imports in progress
@@ -56,20 +62,36 @@ class ImporterController < ApplicationController
     i = 0
     @samples = []
     
+    spread_sheet = nil          # ss = spread sheet
     begin
-      if iip.csv_data.lines.to_a.size <= 1
-        flash[:error] = 'No data line in your CSV, check the encoding of the file<br/><br/>Header :<br/>'.html_safe +
-          iip.csv_data
+      spread_sheet = open_spreadsheet(@@uploaded_file)
 
-        redirect_to importer_index_path(:project_id => @project)
-
-        return
+      if spread_sheet.nil? then        # CSV
+        if iip.csv_data.lines.to_a.size <= 1 then
+          flash[:error] = 'No data line in your CSV, check the encoding of the file<br/><br/>Header :<br/>'.html_safe +
+            iip.csv_data
+          redirect_to importer_index_path(:project_id => @project)
+          return
+        end
+        rows = CSV.new(iip.csv_data, {:headers=>true,
+                              :encoding=>iip.encoding,
+                               :quote_char=>iip.quote_char,
+                               :col_sep=>iip.col_sep})
+      else  # spread sheet
+        spread_sheet.default_sheet = spread_sheet.sheets.first
+        if spread_sheet.last_row <= 1 then
+          flash[:error] = 'No data line in your SpreadSheet, check <br/>Header :<br/>'.html_safe +
+            spread_sheet.row(1)
+          redirect_to importer_index_path(:project_id => @project)
+          return
+        end
+        rows = []
+        2.upto(spread_sheet.last_row) do |line|
+          rows << CSV::Row.new(spread_sheet.row(1), spread_sheet.row(line), true)
+        end
       end
 
-      CSV.new(iip.csv_data, {:headers=>true,
-                            :encoding=>iip.encoding,
-                             :quote_char=>iip.quote_char,
-                             :col_sep=>iip.col_sep}).each do |row|
+      rows.each do |row|
         @samples[i] = row
         i += 1
         if i >= sample_count
@@ -77,11 +99,16 @@ class ImporterController < ApplicationController
         end
       end # do
     rescue Exception => e
-      csv_data_lines = iip.csv_data.lines.to_a
+      if spread_sheet.nil? then        # CSV
+        csv_data_lines = iip.csv_data.lines.to_a
+      else   # spread sheet
+        csv_data_lines = []
+        1.upto(spread_sheet.last_row) { |line| csv_data_lines << spread_sheet.row(line) }
+      end
 
       error_message = e.message +
         '<br/><br/>Header :<br/>'.html_safe +
-        csv_data_lines[0]
+        csv_data_lines[0].to_s
 
       if csv_data_lines.size > 0
         error_message += '<br/><br/>Error on header or line :<br/>'.html_safe +
@@ -107,9 +134,13 @@ class ImporterController < ApplicationController
     }
 
     if missing_header_columns.present?
+      if spread_sheet.nil?
+        header = iip.csv_data.lines.to_a[0]
+      else
+        header = spread_sheet.row(1).to_s
+      end
       flash[:error] = 'Column header missing : ' + missing_header_columns + " / #{@headers.size}" +
-        '<br/><br/>Header :<br/>'.html_safe +
-        iip.csv_data.lines.to_a[0]
+        '<br/><br/>Header :<br/>'.html_safe + header
 
       redirect_to importer_index_path(:project_id => @project)
 
@@ -281,11 +312,22 @@ class ImporterController < ApplicationController
       return
     end
 
-    CSV.new(iip.csv_data, {:headers=>true,
-                           :encoding=>iip.encoding,
-                           :quote_char=>iip.quote_char,
-                           :col_sep=>iip.col_sep}).each do |row|
+    spread_sheet = open_spreadsheet(@@uploaded_file)
 
+    if spread_sheet.nil? then        # CSV
+      rows = CSV.new(iip.csv_data, {:headers=>true,
+                             :encoding=>iip.encoding,
+                             :quote_char=>iip.quote_char,
+                             :col_sep=>iip.col_sep})
+    else  # spread sheet
+      spread_sheet.default_sheet = spread_sheet.sheets.first
+      rows = []
+      2.upto(spread_sheet.last_row) do |line|
+        rows << CSV::Row.new(spread_sheet.row(1), spread_sheet.row(line), true)
+      end
+    end
+
+    rows.each do |row|
       project = Project.find_by_name(row[attrs_map["project"]])
       if !project
         project = @project
@@ -359,6 +401,11 @@ class ImporterController < ApplicationController
           
           # init journal
           note = row[journal_field] || ''
+	  Rails.logger.debug "id: #{issue.id}, note: <#{note}>"
+	  if !note.nil? then
+              note = note.gsub(/\r\n?|\\n|<br\s*\/?>/, "\n")
+	      note.strip!
+	  end
           journal = issue.init_journal(author || User.current, 
             note || '')
             
@@ -393,15 +440,23 @@ class ImporterController < ApplicationController
       # required attributes
       issue.status_id = status != nil ? status.id : issue.status_id
       issue.priority_id = priority != nil ? priority.id : issue.priority_id
-      issue.subject = row[attrs_map["subject"]] || issue.subject
+      subject = row[attrs_map["subject"]]
+      subject.strip! if subject.present?
+      issue.subject = subject || issue.subject
       
       # optional attributes
       description = row[attrs_map["description"]]
+      description.strip! if description.present?
       issue.description = description ?
           description.gsub(/\r\n?|\\n|<br\s*\/?>/, "\n") : issue.description
       issue.category_id = category != nil ? category.id : issue.category_id
-      issue.start_date = row[attrs_map["start_date"]].blank? ? nil : Date.parse(row[attrs_map["start_date"]])
-      issue.due_date = row[attrs_map["due_date"]].blank? ? nil : Date.parse(row[attrs_map["due_date"]])
+      if spread_sheet.nil? then        # CSV
+	issue.start_date = row[attrs_map["start_date"]].blank? ? nil : Date.parse(row[attrs_map["start_date"]])
+	issue.due_date = row[attrs_map["due_date"]].blank? ? nil : Date.parse(row[attrs_map["due_date"]])
+      else    # In case of spread sheet, do not Date.parse
+	issue.start_date = row[attrs_map["start_date"]].blank? ? nil : row[attrs_map["start_date"]]
+	issue.due_date = row[attrs_map["due_date"]].blank? ? nil : row[attrs_map["due_date"]]
+      end
       issue.assigned_to_id = assigned_to != nil ? assigned_to.id : issue.assigned_to_id
       issue.fixed_version_id = fixed_version_id != nil ? fixed_version_id : issue.fixed_version_id
       issue.done_ratio = row[attrs_map["done_ratio"]] || issue.done_ratio
@@ -433,7 +488,8 @@ class ImporterController < ApplicationController
       custom_failed_count = 0
       issue.custom_field_values = issue.available_custom_fields.inject({}) do |h, cf|
         value = row[attrs_map[cf.name]]
-        if value.present?
+        if value.present? then
+	  value.strip!		# by katsuyama
           begin
             if cf.field_format == 'user'
               value = user_id_for_login!(value).to_s
@@ -562,6 +618,16 @@ private
   def flash_message(type, text)
     flash[type] ||= ""
     flash[type] += "#{text}<br/>"
+  end
+
+  def open_spreadsheet(file)
+    case File.extname(file.original_filename)
+    when ".csv" then nil
+    when ".xls" then Roo::Excel.new(file.path, file_warning: :ignore)
+    when ".xlsx" then Roo::Excelx.new(file.path, file_warning: :ignore)
+    when ".ods" then Roo::OpenOffice.new(file.path, file_warning: :ignore)
+    else raise "Unknown file type: #{file.original_filename}"
+    end
   end
   
 end
