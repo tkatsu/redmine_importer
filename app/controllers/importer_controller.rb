@@ -22,7 +22,7 @@ class ImporterController < ApplicationController
   ISSUE_ATTRS = [:id, :subject, :assigned_to, :fixed_version,
     :author, :description, :category, :priority, :tracker, :status,
     :start_date, :due_date, :done_ratio, :estimated_hours,
-    :parent_issue, :watchers ]
+    :parent_issue, :watchers, :project ]
   
   def index
   end
@@ -58,8 +58,10 @@ class ImporterController < ApplicationController
     @original_filename = params[:file].original_filename
     
     # display sample
-    sample_count = 5
+    sample_max = 200
     i = 0
+    @sample_all = 0
+    @sample_count = 0
     @samples = []
     
     spread_sheet = nil          # ss = spread sheet
@@ -94,10 +96,12 @@ class ImporterController < ApplicationController
       rows.each do |row|
         @samples[i] = row
         i += 1
-        if i >= sample_count
+        if i >= sample_max
           break
         end
       end # do
+      @sample_count = i
+      @sample_all = spread_sheet.last_row - 1
     rescue Exception => e
       if spread_sheet.nil? then        # CSV
         csv_data_lines = iip.csv_data.lines.to_a
